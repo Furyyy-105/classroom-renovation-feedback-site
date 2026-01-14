@@ -1,0 +1,136 @@
+# Install required packages (run in terminal):
+# pip install streamlit pandas numpy matplotlib requests ccxt newsapi-python python-coinmarketcap dexscreener
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import ccxt
+from newsapi import NewsApiClient
+import coinmarketcapapi
+from dexscreener import DexscreenerClient
+from datetime import datetime
+
+# Function to calculate EMA
+def calculate_ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
+
+# Function to calculate MA (Simple Moving Average)
+def calculate_ma(series, period):
+    return series.rolling(window=period).mean()
+
+# Function to calculate RSI
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
+    loss = -delta.where(delta < 0, 0).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+# Function to generate signals based on indicators
+def generate_signals(df, rsi_period=14, ema_short=12, ema_long=26, ma_period=50):
+    df['EMA_short'] = calculate_ema(df['close'], ema_short)
+    df['EMA_long'] = calculate_ema(df['close'], ema_long)
+    df['MA'] = calculate_ma(df['close'], ma_period)
+    df['RSI'] = calculate_rsi(df['close'], rsi_period)
+    
+    # Signals: Buy if EMA short > EMA long and RSI < 30; Sell if EMA short < EMA long and RSI > 70
+    df['Signal'] = 0
+    df.loc[(df['EMA_short'] > df['EMA_long']) & (df['RSI'] < 30), 'Signal'] = 1  # Buy
+    df.loc[(df['EMA_short'] < df['EMA_long']) & (df['RSI'] > 70), 'Signal'] = -1  # Sell
+    return df
+
+# Streamlit App
+st.title("Crypto Signals Website")
+st.write("Get technical analysis (RSI, EMA, MA) and news updates for cryptocurrencies. Data from Binance, CoinMarketCap, and DexScreener.")
+
+# User Inputs
+st.sidebar.header("Settings")
+coin = st.sidebar.text_input("Cryptocurrency Symbol (e.g., BTCUSDT for Binance, or token name for Dex)", "BTCUSDT")
+timeframe = st.sidebar.selectbox("Timeframe", ["1m", "5m", "15m", "1h", "4h", "1d"])
+limit = st.sidebar.number_input("Number of Candles", value=200)
+cmc_api_key = st.sidebar.text_input("CoinMarketCap API Key", type="password")
+news_api_key = st.sidebar.text_input("NewsAPI Key", type="password")
+alpha_search = st.sidebar.text_input("Search for Alpha Coins (e.g., new tokens)", "")
+
+# Section 1: Technical Analysis from Binance
+st.header(f"Technical Analysis for {coin} on Binance")
+if st.button("Fetch and Analyze Data"):
+    try:
+        binance = ccxt.binance()
+        ohlcv = binance.fetch_ohlcv(coin, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        
+        df = generate_signals(df)
+        
+        st.dataframe(df.tail(10))  # Show last 10 rows
+        
+        # Plot Price and Indicators
+        fig, ax1 = plt.subplots(figsize=(12, 6))
+        ax1.plot(df['timestamp'], df['close'], label='Close Price', color='blue')
+        ax1.plot(df['timestamp'], df['EMA_short'], label='EMA Short', color='green')
+        ax1.plot(df['timestamp'], df['EMA_long'], label='EMA Long', color='red')
+        ax1.plot(df['timestamp'], df['MA'], label='MA', color='purple')
+        ax1.set_ylabel('Price')
+        ax1.legend(loc='upper left')
+        
+        ax2 = ax1.twinx()
+        ax2.plot(df['timestamp'], df['RSI'], label='RSI', color='orange')
+        ax2.axhline(70, color='red', linestyle='--')
+        ax2.axhline(30, color='green', linestyle='--')
+        ax2.set_ylabel('RSI')
+        ax2.legend(loc='upper right')
+        
+        buy_signals = df[df['Signal'] == 1]
+        sell_signals = df[df['Signal'] == -1]
+        ax1.scatter(buy_signals['timestamp'], buy_signals['close'], marker='^', color='green', label='Buy Signal')
+        ax1.scatter(sell_signals['timestamp'], sell_signals['close'], marker='v', color='red', label='Sell Signal')
+        
+        st.pyplot(fig)
+        
+        st.write("Latest Signal: ", "Buy" if df['Signal'].iloc[-1] == 1 else "Sell" if df['Signal'].iloc[-1] == -1 else "Hold")
+    except Exception as e:
+        st.error(f"Error fetching data from Binance: {e}")
+
+# Section 2: Alpha Coins from DexScreener
+st.header("Alpha Coins Analysis from DexScreener")
+if alpha_search and st.button("Search Alpha Coins"):
+    try:
+        client = DexscreenerClient()
+        pairs = client.search_pairs(alpha_search)
+        if pairs:
+            st.write("Found Pairs:")
+            for pair in pairs:
+                st.write(f"Chain: {pair.chain_id}, Dex: {pair.dex_id}, Symbol: {pair.base_token.symbol}, Price: {pair.price_usd}")
+        else:
+            st.write("No pairs found.")
+    except Exception as e:
+        st.error(f"Error with DexScreener: {e}")
+
+# Section 3: CoinMarketCap Data
+st.header("Market Data from CoinMarketCap")
+if cmc_api_key and st.button("Fetch CMC Data"):
+    try:
+        cmc = coinmarketcapapi.CoinMarketCapAPI(cmc_api_key)
+        data = cmc.cryptocurrency_quotes_latest(symbol=coin.split('USDT')[0])  # e.g., BTC
+        st.write(data.data)
+    except Exception as e:
+        st.error(f"Error with CoinMarketCap: {e}")
+
+# Section 4: Crypto News
+st.header("Latest Crypto News")
+if news_api_key and st.button("Fetch News"):
+    try:
+        newsapi = NewsApiClient(api_key=news_api_key)
+        headlines = newsapi.get_top_headlines(q='cryptocurrency', language='en', page_size=5)
+        for article in headlines['articles']:
+            st.subheader(article['title'])
+            st.write(article['description'])
+            st.write(f"Source: {article['source']['name']}, Published: {article['publishedAt']}")
+            st.write(article['url'])
+    except Exception as e:
+        st.error(f"Error fetching news: {e}")
+
+st.write("Note: Obtain API keys from respective services. News updates in real-time on fetch. For production, deploy on Streamlit Sharing or similar.")
